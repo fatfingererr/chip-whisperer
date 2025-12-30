@@ -1,0 +1,31 @@
+# Chip Whisperer - MT5 Integration Requirements
+# Python 3.10+
+
+# Core dependencies
+MetaTrader5>=5.0.4510
+pandas>=2.0.0
+numpy>=1.24.0
+pyyaml>=6.0
+python-dotenv>=1.0.0
+
+# Logging and utilities
+loguru>=0.7.0
+
+# Testing
+pytest>=7.4.0
+pytest-cov>=4.1.0
+pytest-mock>=3.11.0
+
+# Development
+black>=23.7.0
+flake8>=6.1.0
+mypy>=1.5.0
+
+# Telegram Bot
+python-telegram-bot>=20.0
+
+# Anthropic Claude SDK
+anthropic>=0.18.0
+
+# Async support
+aiohttp>=3.9.0
