@@ -1,11 +1,10 @@
-# Chip Whisperer - MT5 Integration Requirements
+﻿# Chip Whisperer - MT5 Integration Requirements
 # Python 3.10+
 
 # Core dependencies
 MetaTrader5>=5.0.4510
 pandas>=2.0.0
 numpy>=1.24.0
-pyyaml>=6.0
 python-dotenv>=1.0.0
 
 # Logging and utilities
@@ -29,3 +28,11 @@ anthropic>=0.18.0
 
 # Async support
 aiohttp>=3.9.0
+
+# SQLite 快取管理
+click>=8.1.0
+tabulate>=0.9.0
+
+# 視覺化
+plotly>=5.18.0
+kaleido>=0.2.1
