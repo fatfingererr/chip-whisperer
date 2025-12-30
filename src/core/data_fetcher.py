@@ -12,6 +12,7 @@ import pandas as pd
 from loguru import logger
 
 from .mt5_client import ChipWhispererMT5Client
+from .sqlite_cache import SQLiteCacheManager
 
 
 class HistoricalDataFetcher:
@@ -46,19 +47,36 @@ class HistoricalDataFetcher:
         'MN1': mt5.TIMEFRAME_MN1,    # 月線
     }
 
-    def __init__(self, client: ChipWhispererMT5Client, cache_dir: Optional[str] = None):
+    def __init__(
+        self,
+        client: ChipWhispererMT5Client,
+        cache_dir: Optional[str] = None,
+        use_sqlite: bool = True
+    ):
         """
         初始化資料取得器
 
         參數：
             client: MT5 客戶端實例
             cache_dir: 快取目錄路徑（可選）
+            use_sqlite: 是否使用 SQLite 快取（預設 True）
         """
         self.client = client
         self.cache_dir = Path(cache_dir) if cache_dir else Path('data/cache')
+        self.use_sqlite = use_sqlite
 
         # 建立快取目錄
         self.cache_dir.mkdir(parents=True, exist_ok=True)
+
+        # 初始化 SQLite 快取管理器
+        if self.use_sqlite:
+            db_path = self.cache_dir / 'mt5_cache.db'
+            self.sqlite_cache = SQLiteCacheManager(str(db_path))
+            logger.info("SQLite 快取已啟用")
+        else:
+            self.sqlite_cache = None
+            logger.info("SQLite 快取已停用，使用檔案快取")
+
         logger.debug(f"資料快取目錄：{self.cache_dir}")
 
     def _get_timeframe_constant(self, timeframe: str) -> int:
@@ -149,6 +167,43 @@ class HistoricalDataFetcher:
 
         return True
 
+    def _fetch_from_mt5_by_date(
+        self,
+        symbol: str,
+        timeframe: str,
+        from_date: datetime,
+        to_date: datetime
+    ) -> pd.DataFrame:
+        """
+        從 MT5 取得指定日期範圍的數據（內部輔助方法）
+
+        參數：
+            symbol: 商品代碼
+            timeframe: 時間週期
+            from_date: 起始日期（UTC）
+            to_date: 結束日期（UTC）
+
+        回傳：
+            K 線數據 DataFrame
+        """
+        self._verify_symbol(symbol)
+        tf_constant = self._get_timeframe_constant(timeframe)
+        self.client.ensure_connected()
+
+        # 從 MT5 取得數據
+        rates = mt5.copy_rates_range(symbol, tf_constant, from_date, to_date)
+
+        if rates is None or len(rates) == 0:
+            logger.warning(f"MT5 未返回數據：{symbol} {timeframe} {from_date} ~ {to_date}")
+            return pd.DataFrame()
+
+        # 轉換為 DataFrame
+        df = pd.DataFrame(rates)
+        df['time'] = pd.to_datetime(df['time'], unit='s', utc=True)
+        df = df.sort_values('time', ascending=False).reset_index(drop=True)
+
+        return df
+
     def get_candles_latest(
         self,
         symbol: str,
@@ -172,27 +227,42 @@ class HistoricalDataFetcher:
         """
         logger.info(f"取得 {symbol} {timeframe} 最新 {count} 根 K 線")
 
-        # 驗證參數
+        # 如果啟用 SQLite 快取
+        if self.use_sqlite and self.sqlite_cache:
+            # 計算時間範圍
+            end_time = datetime.now(timezone.utc)
+
+            # 根據時間週期計算起始時間
+            interval_minutes = self.sqlite_cache.TIMEFRAME_MINUTES.get(
+                timeframe.upper(), 60
+            )
+            start_time = end_time - timedelta(minutes=interval_minutes * count * 1.5)
+
+            # 使用智能查詢
+            df = self.sqlite_cache.fetch_candles_smart(
+                symbol=symbol,
+                timeframe=timeframe,
+                from_date=start_time,
+                to_date=end_time,
+                fetcher_callback=self._fetch_from_mt5_by_date
+            )
+
+            # 限制返回數量
+            return df.head(count)
+
+        # 原有邏輯：直接從 MT5 取得
         self._verify_symbol(symbol)
         tf_constant = self._get_timeframe_constant(timeframe)
-
-        # 確保已連線
         self.client.ensure_connected()
 
-        # 從 MT5 取得資料
         rates = mt5.copy_rates_from_pos(symbol, tf_constant, 0, count)
 
         if rates is None or len(rates) == 0:
             error = mt5.last_error()
             raise RuntimeError(f"取得 K 線資料失敗：{error}")
 
-        # 轉換為 DataFrame
         df = pd.DataFrame(rates)
-
-        # 處理時間欄位（轉換為 datetime，UTC 時區）
         df['time'] = pd.to_datetime(df['time'], unit='s', utc=True)
-
-        # 按時間排序（最新的在前）
         df = df.sort_values('time', ascending=False).reset_index(drop=True)
 
         logger.info(f"成功取得 {len(df)} 根 K 線")
@@ -225,13 +295,6 @@ class HistoricalDataFetcher:
         """
         logger.info(f"取得 {symbol} {timeframe} K 線資料：{from_date} ~ {to_date}")
 
-        # 驗證參數
-        self._verify_symbol(symbol)
-        tf_constant = self._get_timeframe_constant(timeframe)
-
-        # 確保已連線
-        self.client.ensure_connected()
-
         # 解析日期
         from_datetime = None
         to_datetime = None
@@ -242,6 +305,27 @@ class HistoricalDataFetcher:
         if to_date:
             to_datetime = self._parse_date(to_date, is_end_date=True)
 
+        # 如果啟用 SQLite 快取且有明確的日期範圍
+        if self.use_sqlite and self.sqlite_cache and from_datetime and to_datetime:
+            # 確保日期順序正確
+            if from_datetime > to_datetime:
+                logger.warning("起始日期晚於結束日期，已自動交換")
+                from_datetime, to_datetime = to_datetime, from_datetime
+
+            # 使用智能查詢
+            return self.sqlite_cache.fetch_candles_smart(
+                symbol=symbol,
+                timeframe=timeframe,
+                from_date=from_datetime,
+                to_date=to_datetime,
+                fetcher_callback=self._fetch_from_mt5_by_date
+            )
+
+        # 原有邏輯（未啟用 SQLite 或參數不完整時）
+        self._verify_symbol(symbol)
+        tf_constant = self._get_timeframe_constant(timeframe)
+        self.client.ensure_connected()
+
         # 確保日期順序正確
         if from_datetime and to_datetime and from_datetime > to_datetime:
             logger.warning("起始日期晚於結束日期，已自動交換")
@@ -251,39 +335,29 @@ class HistoricalDataFetcher:
         rates = None
 
         if from_datetime and to_datetime:
-            # 兩個日期都提供：使用範圍查詢
             logger.debug(f"使用範圍查詢：{from_datetime} ~ {to_datetime}")
             rates = mt5.copy_rates_range(symbol, tf_constant, from_datetime, to_datetime)
 
         elif from_datetime:
-            # 只有起始日期：從該日期開始取得指定數量
             logger.debug(f"從 {from_datetime} 開始取得 {default_count} 根")
             rates = mt5.copy_rates_from(symbol, tf_constant, from_datetime, default_count)
 
         elif to_datetime:
-            # 只有結束日期：往前推 30 天
             lookback_days = 30
             start_date = to_datetime - timedelta(days=lookback_days)
             logger.debug(f"使用範圍查詢（往前推 {lookback_days} 天）：{start_date} ~ {to_datetime}")
             rates = mt5.copy_rates_range(symbol, tf_constant, start_date, to_datetime)
 
         else:
-            # 沒有日期：取得最新資料
             logger.debug(f"取得最新 {default_count} 根")
             rates = mt5.copy_rates_from_pos(symbol, tf_constant, 0, default_count)
 
-        # 驗證資料
         if rates is None or len(rates) == 0:
             error = mt5.last_error()
             raise RuntimeError(f"取得 K 線資料失敗：{error}")
 
-        # 轉換為 DataFrame
         df = pd.DataFrame(rates)
-
-        # 處理時間欄位
         df['time'] = pd.to_datetime(df['time'], unit='s', utc=True)
-
-        # 按時間排序（最新的在前）
         df = df.sort_values('time', ascending=False).reset_index(drop=True)
 
         logger.info(f"成功取得 {len(df)} 根 K 線")

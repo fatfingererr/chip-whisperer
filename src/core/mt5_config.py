@@ -2,13 +2,12 @@
 MT5 設定管理模組
 
 此模組負責載入和管理 MT5 連線所需的所有設定參數。
-支援多種設定來源：環境變數、.env 檔案、YAML 設定檔。
+僅支援 .env 檔案作為設定來源。
 """
 
 import os
 from pathlib import Path
 from typing import Any, Dict, Optional
-import yaml
 from dotenv import load_dotenv
 from loguru import logger
 
@@ -17,14 +16,13 @@ class MT5Config:
     """
     MT5 設定管理類別
 
-    負責從多個來源載入設定，並提供驗證和存取介面。
-    優先順序：環境變數 > .env 檔案 > YAML 設定檔 > 預設值
+    負責從 .env 檔案載入設定，並提供驗證和存取介面。
+    優先順序：環境變數 > .env 檔案 > 預設值
     """
 
     def __init__(
         self,
         env_file: Optional[str] = None,
-        yaml_file: Optional[str] = None,
         config_dict: Optional[Dict[str, Any]] = None
     ):
         """
@@ -32,20 +30,18 @@ class MT5Config:
 
         參數：
             env_file: .env 檔案路徑（若為 None 則使用專案根目錄的 .env）
-            yaml_file: YAML 設定檔路徑（若為 None 則使用 config/mt5_config.yaml）
             config_dict: 直接提供的設定字典（優先權最高）
         """
         self._config: Dict[str, Any] = {}
 
-        # 載入設定（依優先順序）
-        self._load_yaml_config(yaml_file)
+        # 載入 .env 設定
         self._load_env_config(env_file)
 
         # 如果直接提供設定字典，覆蓋現有設定
         if config_dict:
             self._config.update(config_dict)
 
-        logger.debug(f"MT5Config 初始化完成，設定來源：env_file={env_file}, yaml_file={yaml_file}")
+        logger.debug(f"MT5Config 初始化完成，設定來源：env_file={env_file}")
 
     def _load_env_config(self, env_file: Optional[str] = None) -> None:
         """
@@ -82,44 +78,8 @@ class MT5Config:
         # 只保留有值的設定項目
         env_config = {k: v for k, v in env_config.items() if v is not None}
 
-        # 將環境變數設定合併到主設定中（會覆蓋 YAML 設定）
+        # 更新設定
         self._config.update(env_config)
-
-    def _load_yaml_config(self, yaml_file: Optional[str] = None) -> None:
-        """
-        從 YAML 檔案載入設定
-
-        參數：
-            yaml_file: YAML 設定檔路徑
-        """
-        # 確定 YAML 檔案路徑
-        if yaml_file:
-            config_path = Path(yaml_file)
-        else:
-            config_path = Path('config/mt5_config.yaml')
-
-        # 如果檔案不存在，嘗試使用範例檔案
-        if not config_path.exists():
-            logger.debug(f"YAML 設定檔不存在：{config_path}")
-            return
-
-        # 讀取 YAML 檔案
-        try:
-            with open(config_path, 'r', encoding='utf-8') as f:
-                yaml_data = yaml.safe_load(f)
-
-            if not yaml_data:
-                logger.warning(f"YAML 設定檔為空：{config_path}")
-                return
-
-            # 提取 MT5 相關設定
-            mt5_config = yaml_data.get('mt5', {})
-            self._config.update(mt5_config)
-
-            logger.debug(f"已載入 YAML 設定檔：{config_path}")
-
-        except Exception as e:
-            logger.error(f"載入 YAML 設定檔失敗：{config_path}，錯誤：{e}")
 
     def get(self, key: str, default: Any = None) -> Any:
         """
