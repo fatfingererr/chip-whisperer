@@ -1,3 +1,5 @@
+thoughts/ricky
+
 data/
 output/
 nul
@@ -227,3 +229,6 @@ logs/
 # Analysis outputs
 output/
 results/
+
+# Markets data (auto-generated)
+markets/
