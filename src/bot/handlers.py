@@ -4,7 +4,7 @@
 此模組定義所有 Telegram Bot 的訊息處理函式。
 """
 
-from telegram import Update
+from telegram import Update, Chat, ChatMember
 from telegram.ext import ContextTypes
 from loguru import logger
 import sys
@@ -25,15 +25,27 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     處理 /start 指令
 
-    顯示歡迎訊息和基本使用說明。
+    只在允許的群組中響應管理員。
     """
+    chat = update.effective_chat
     user = update.effective_user
-    logger.info(f"用戶 {user.id} ({user.username}) 執行 /start 指令")
+
+    # 忽略私聊
+    if chat.type == Chat.PRIVATE:
+        logger.debug(f"忽略私聊 /start 指令（用戶: {user.id}）")
+        return
+
+    # 檢查群組和管理員權限
+    config: BotConfig = context.bot_data.get('config')
+    if not await _check_group_admin(update, context, config):
+        return
+
+    logger.info(f"群組 {chat.id} 管理員 {user.id} ({user.username}) 執行 /start 指令")
 
     welcome_message = f"""
 你好，{user.first_name}！
 
-我是 MT5 交易助手，可以協助你查詢市場數據和計算技術指標。
+我是 MT5 交易助手，可以協助查詢市場數據和計算技術指標。
 
 可用功能：
 • 查詢 K 線資料
@@ -64,10 +76,22 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     處理 /help 指令
 
-    顯示詳細的使用說明。
+    只在允許的群組中響應管理員。
     """
+    chat = update.effective_chat
     user = update.effective_user
-    logger.info(f"用戶 {user.id} ({user.username}) 執行 /help 指令")
+
+    # 忽略私聊
+    if chat.type == Chat.PRIVATE:
+        logger.debug(f"忽略私聊 /help 指令（用戶: {user.id}）")
+        return
+
+    # 檢查群組和管理員權限
+    config: BotConfig = context.bot_data.get('config')
+    if not await _check_group_admin(update, context, config):
+        return
+
+    logger.info(f"群組 {chat.id} 管理員 {user.id} ({user.username}) 執行 /help 指令")
 
     help_message = """
 **MT5 交易助手使用說明**
@@ -123,19 +147,24 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     處理 /status 指令
 
-    檢查系統狀態和連線。
+    只在允許的群組中響應管理員。
     """
+    chat = update.effective_chat
     user = update.effective_user
-    logger.info(f"用戶 {user.id} ({user.username}) 執行 /status 指令")
 
-    # 檢查 Agent 是否可用
+    # 忽略私聊
+    if chat.type == Chat.PRIVATE:
+        logger.debug(f"忽略私聊 /status 指令（用戶: {user.id}）")
+        return
+
+    # 檢查群組和管理員權限
+    config: BotConfig = context.bot_data.get('config')
+    if not await _check_group_admin(update, context, config):
+        return
+
+    logger.info(f"群組 {chat.id} 管理員 {user.id} ({user.username}) 執行 /status 指令")
+
     try:
-        # 嘗試初始化 Agent（使用 context.bot_data 中的設定）
-        config: BotConfig = context.bot_data.get('config')
-        if not config:
-            await update.message.reply_text("錯誤：Bot 設定未載入")
-            return
-
         agent = MT5Agent(
             api_key=config.anthropic_api_key,
             model=config.claude_model
@@ -147,6 +176,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
 ✅ Telegram Bot：運作中
 ✅ Claude Agent：已連線（模型：{config.claude_model}）
 ✅ MT5 連線：待檢查（需實際查詢時連線）
+✅ 群組 ID：{chat.id}
 
 狀態：正常
 """
@@ -157,6 +187,44 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(f"系統狀態異常：{str(e)}")
 
 
+async def crawl_now_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """
+    /crawl_now 指令處理器
+
+    手動觸發一次新聞爬取（僅限管理員）
+    """
+    chat = update.effective_chat
+    user = update.effective_user
+
+    # 忽略私聊
+    if chat.type == Chat.PRIVATE:
+        logger.debug(f"忽略私聊 /crawl_now 指令（用戶: {user.id}）")
+        return
+
+    # 檢查群組和管理員權限
+    config: BotConfig = context.bot_data.get('config')
+    if not await _check_group_admin(update, context, config):
+        return
+
+    logger.info(f"群組 {chat.id} 管理員 {user.id} ({user.username}) 執行 /crawl_now 指令")
+
+    await update.message.reply_text("🔄 正在手動觸發新聞爬取...")
+
+    try:
+        # 取得爬蟲調度器（從 Bot 實例）
+        crawler_scheduler = context.application.bot_data.get('crawler_scheduler')
+
+        if crawler_scheduler:
+            await crawler_scheduler._crawl_and_notify()
+            await update.message.reply_text("✅ 爬取完成，請查看上方通知")
+        else:
+            await update.message.reply_text("❌ 爬蟲未啟動")
+
+    except Exception as e:
+        logger.error(f"手動爬取失敗：{e}")
+        await update.message.reply_text(f"❌ 爬取失敗：{e}")
+
+
 # ============================================================================
 # 訊息處理器
 # ============================================================================
@@ -165,23 +233,46 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     處理一般文字訊息
 
-    將用戶訊息傳遞給 Agent 處理，並回傳結果。
+    只處理白名單群組中管理員的訊息。
+    私聊訊息和非授權訊息會被靜默忽略。
     """
     user = update.effective_user
+    chat = update.effective_chat
     user_message = update.message.text
 
-    logger.info(f"用戶 {user.id} ({user.username}) 傳送訊息：{user_message}")
+    # ========================================================================
+    # 1. 忽略私聊訊息
+    # ========================================================================
+    if chat.type == Chat.PRIVATE:
+        logger.debug(f"忽略私聊訊息（用戶: {user.id}）")
+        return  # 靜默忽略，不回應
 
-    # 檢查權限
+    # ========================================================================
+    # 2. 忽略非群組訊息（頻道等）
+    # ========================================================================
+    if chat.type not in [Chat.GROUP, Chat.SUPERGROUP]:
+        logger.debug(f"忽略非群組訊息（類型: {chat.type}）")
+        return
+
+    # ========================================================================
+    # 3. 檢查群組白名單和管理員權限
+    # ========================================================================
     config: BotConfig = context.bot_data.get('config')
     if not config:
-        await update.message.reply_text("錯誤：Bot 設定未載入")
+        logger.error("Bot 設定未載入")
         return
 
-    if not config.is_admin(user.id):
-        logger.warning(f"用戶 {user.id} 無權限使用此 Bot")
-        await update.message.reply_text("抱歉，您沒有權限使用此 Bot。")
-        return
+    if not await _check_group_admin(update, context, config):
+        return  # 靜默忽略
+
+    # ========================================================================
+    # 4. 記錄並處理訊息
+    # ========================================================================
+    logger.info(
+        f"處理訊息 - 群組: {chat.id} ({chat.title}), "
+        f"管理員: {user.id} ({user.username}), "
+        f"訊息: {user_message}"
+    )
 
     # 顯示處理中訊息
     processing_message = await update.message.reply_text("正在處理您的請求，請稍候...")
@@ -211,7 +302,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             for chunk in chunks:
                 await update.message.reply_text(chunk)
 
-        logger.info(f"成功回應用戶 {user.id}")
+        logger.info(f"成功回應群組 {chat.id} 管理員 {user.id}")
 
     except Exception as e:
         logger.exception(f"處理訊息時發生錯誤：{str(e)}")
@@ -230,11 +321,68 @@ async def handle_error(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """
     處理錯誤
 
-    記錄所有錯誤並通知用戶。
+    記錄所有錯誤。
     """
     logger.exception(f"更新 {update} 發生錯誤：{context.error}")
 
-    if update and update.effective_message:
-        await update.effective_message.reply_text(
-            "抱歉，發生了一個錯誤。請稍後再試或聯絡管理員。"
+    # 只在群組中回應錯誤（且只對管理員）
+    if update and update.effective_message and update.effective_chat:
+        chat = update.effective_chat
+        if chat.type in [Chat.GROUP, Chat.SUPERGROUP]:
+            config: BotConfig = context.bot_data.get('config')
+            if config and config.is_allowed_group(chat.id):
+                await update.effective_message.reply_text(
+                    "抱歉，發生了一個錯誤。請稍後再試或聯絡管理員。"
+                )
+
+
+# ============================================================================
+# 輔助函式
+# ============================================================================
+
+async def _check_group_admin(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    config: BotConfig
+) -> bool:
+    """
+    檢查是否為允許群組的管理員
+
+    參數：
+        update: Telegram Update 物件
+        context: Bot Context
+        config: Bot 設定
+
+    回傳：
+        True 如果是允許群組的管理員，否則 False
+    """
+    chat = update.effective_chat
+    user = update.effective_user
+
+    # 檢查群組白名單
+    if not config.is_allowed_group(chat.id):
+        logger.debug(
+            f"忽略未授權群組訊息 - 群組: {chat.id}, 用戶: {user.id}"
         )
+        return False
+
+    # 檢查管理員身份
+    try:
+        member = await context.bot.get_chat_member(chat.id, user.id)
+        is_admin = member.status in [
+            ChatMember.ADMINISTRATOR,
+            ChatMember.OWNER
+        ]
+
+        if not is_admin:
+            logger.debug(
+                f"忽略非管理員訊息 - 群組: {chat.id}, "
+                f"用戶: {user.id}, 身份: {member.status}"
+            )
+            return False
+
+        return True
+
+    except Exception as e:
+        logger.error(f"檢查群組管理員身份時發生錯誤：{e}")
+        return False

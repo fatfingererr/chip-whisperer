@@ -11,7 +11,7 @@ MT5 Telegram Bot 啟動腳本
 環境變數：
     - TELEGRAM_BOT_TOKEN: Telegram Bot Token（必要）
     - ANTHROPIC_API_KEY: Anthropic API Key（必要）
-    - TELEGRAM_ADMIN_IDS: 管理員用戶 ID，用逗號分隔（可選）
+    - TELEGRAM_GROUP_IDS: 允許的群組 ID，用逗號分隔（必要）
     - CLAUDE_MODEL: Claude 模型名稱（可選）
     - DEBUG: 除錯模式（可選）
 """
@@ -43,7 +43,7 @@ def setup_logging(debug: bool = False):
     # 新增控制台輸出
     logger.add(
         sys.stderr,
-        format="<green>{time:YYYY-MM-DD HH:mm:ss}</green> | "
+        format="<green>{time:YYYY-MM-DD HH:mm:ss.SSS}</green> | "
                "<level>{level: <8}</level> | "
                "<cyan>{name}</cyan>:<cyan>{function}</cyan>:<cyan>{line}</cyan> - "
                "<level>{message}</level>",
@@ -53,11 +53,11 @@ def setup_logging(debug: bool = False):
 
     # 新增檔案輸出
     logger.add(
-        "logs/bot_{time:YYYY-MM-DD}.log",
+        "logs/{time:YYYY-MM-DD}.log",
         rotation="00:00",  # 每天午夜輪換
         retention="30 days",  # 保留 30 天
         level=log_level,
-        format="{time:YYYY-MM-DD HH:mm:ss} | {level: <8} | {name}:{function}:{line} - {message}",
+        format="{time:YYYY-MM-DD HH:mm:ss.SSS} {level: <8} {name}:{function}:{line} - {message}",
         encoding="utf-8"
     )
 
@@ -80,10 +80,7 @@ def main():
         logger.info("=" * 60)
         logger.info(f"Claude 模型：{config.claude_model}")
         logger.info(f"除錯模式：{'開啟' if config.debug else '關閉'}")
-        if config.telegram_admin_ids:
-            logger.info(f"管理員數量：{len(config.telegram_admin_ids)}")
-        else:
-            logger.warning("未設定管理員 ID，所有用戶都可使用")
+        logger.info(f"允許的群組數量：{len(config.telegram_group_ids)}")
         logger.info("=" * 60)
 
         # 建立並啟動 Bot
