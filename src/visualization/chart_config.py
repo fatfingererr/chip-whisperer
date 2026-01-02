@@ -9,11 +9,11 @@ COLORS = {
     'candle_down': '#ef5350',    # 下跌（紅色）
 
     # Pivot Range 方塊
-    'range_fill': 'rgba(255, 255, 153, 0.3)',    # 淺黃色填充
+    'range_fill': 'rgba(255, 255, 153, 0.5)',    # 淺黃色填充，透明度 50%
     'range_border': 'rgba(204, 153, 0, 1.0)',    # 深黃色邊框
 
     # Volume Profile（提高不透明度使其更明顯）
-    'volume_in_va': 'rgba(65, 105, 225, 0.85)',   # Value Area 內（皇家藍）
+    'volume_in_va': 'rgba(213, 166, 52, 0.85)',   # Value Area 內（金黃色 #D5A634）
     'volume_out_va': 'rgba(128, 128, 128, 0.65)', # Value Area 外（灰色）
 
     # 輔助線
@@ -27,7 +27,7 @@ COLORS = {
 
 # 線條樣式
 LINE_STYLES = {
-    'poc': 'dash',     # 虛線
+    'poc': 'solid',    # 實線
     'va': 'dot'        # 點線
 }
 
@@ -36,13 +36,6 @@ DEFAULT_LAYOUT = {
     'plot_bgcolor': 'white',
     'paper_bgcolor': 'white',
     'font': {'family': 'Arial, sans-serif', 'size': 12},
-    'hovermode': 'x unified',
-    'showlegend': True,
-    'legend': {
-        'orientation': 'v',
-        'yanchor': 'top',
-        'y': 1,
-        'xanchor': 'left',
-        'x': 1.01
-    }
+    'hovermode': 'x unified'
+    # showlegend 和 legend 由主函數控制
 }

@@ -3,14 +3,15 @@
 VPPA 分析腳本
 
 此腳本會：
-1. 補充 DB 數據（從最後一筆到目前為止的 M1）
-2. 往回取 2000 根 M1 數據
+1. 補充 DB 數據（從最後一筆到目前為止）
+2. 往回取指定數量的 K 線數據
 3. 計算 Pivot Point 和 Volume Profile
 4. 輸出 JSON 格式的分析結果
 
 使用方式：
     python scripts/analyze_vppa.py GOLD
-    python scripts/analyze_vppa.py GOLD --count 3000
+    python scripts/analyze_vppa.py GOLD --timeframe M5
+    python scripts/analyze_vppa.py GOLD --timeframe H1 --count 500
     python scripts/analyze_vppa.py GOLD --output results/gold_vppa.json
     python scripts/analyze_vppa.py GOLD --pivot-length 15 --price-levels 30
     python scripts/analyze_vppa.py GOLD --plot
@@ -38,6 +39,40 @@ from src.core.sqlite_cache import SQLiteCacheManager
 from src.agent.indicators import calculate_vppa
 
 
+# MT5 時間週期對應表
+TIMEFRAME_MAP = {
+    'M1': mt5.TIMEFRAME_M1,
+    'M2': mt5.TIMEFRAME_M2,
+    'M3': mt5.TIMEFRAME_M3,
+    'M4': mt5.TIMEFRAME_M4,
+    'M5': mt5.TIMEFRAME_M5,
+    'M6': mt5.TIMEFRAME_M6,
+    'M10': mt5.TIMEFRAME_M10,
+    'M12': mt5.TIMEFRAME_M12,
+    'M15': mt5.TIMEFRAME_M15,
+    'M20': mt5.TIMEFRAME_M20,
+    'M30': mt5.TIMEFRAME_M30,
+    'H1': mt5.TIMEFRAME_H1,
+    'H2': mt5.TIMEFRAME_H2,
+    'H3': mt5.TIMEFRAME_H3,
+    'H4': mt5.TIMEFRAME_H4,
+    'H6': mt5.TIMEFRAME_H6,
+    'H8': mt5.TIMEFRAME_H8,
+    'H12': mt5.TIMEFRAME_H12,
+    'D1': mt5.TIMEFRAME_D1,
+    'W1': mt5.TIMEFRAME_W1,
+    'MN1': mt5.TIMEFRAME_MN1,
+}
+
+# 時間週期對應的分鐘數
+TIMEFRAME_MINUTES = {
+    'M1': 1, 'M2': 2, 'M3': 3, 'M4': 4, 'M5': 5, 'M6': 6,
+    'M10': 10, 'M12': 12, 'M15': 15, 'M20': 20, 'M30': 30,
+    'H1': 60, 'H2': 120, 'H3': 180, 'H4': 240, 'H6': 360, 'H8': 480, 'H12': 720,
+    'D1': 1440, 'W1': 10080, 'MN1': 43200,
+}
+
+
 class NumpyEncoder(json.JSONEncoder):
     """自訂 JSON 編碼器，處理 NumPy 類型"""
     def default(self, obj):
@@ -56,6 +91,7 @@ class NumpyEncoder(json.JSONEncoder):
 
 def update_db_to_now(
     symbol: str,
+    timeframe: str,
     cache: SQLiteCacheManager,
     client: ChipWhispererMT5Client
 ) -> int:
@@ -64,25 +100,26 @@ def update_db_to_now(
 
     參數：
         symbol: 商品代碼
+        timeframe: 時間週期
         cache: SQLite 快取管理器
         client: MT5 客戶端
 
     回傳：
         新增的數據筆數
     """
-    timeframe = 'M1'
-    tf_constant = mt5.TIMEFRAME_M1
+    tf_constant = TIMEFRAME_MAP[timeframe]
+    tf_minutes = TIMEFRAME_MINUTES[timeframe]
 
     # 取得 DB 中最新的時間
     newest_time = cache.get_newest_time(symbol, timeframe)
 
     if newest_time:
         logger.info(f"DB 最新數據時間：{newest_time}")
-        # 從最新時間的下一分鐘開始取
-        from_time = newest_time + timedelta(minutes=1)
+        # 從最新時間的下一個週期開始取
+        from_time = newest_time + timedelta(minutes=tf_minutes)
     else:
-        logger.info("DB 中無數據，從現在往回取 2000 根")
-        from_time = datetime.now(timezone.utc) - timedelta(minutes=2000)
+        logger.info(f"DB 中無數據，從現在往回取 2000 根")
+        from_time = datetime.now(timezone.utc) - timedelta(minutes=tf_minutes * 2000)
 
     # 取得到目前為止的數據
     to_time = datetime.now(timezone.utc)
@@ -114,17 +151,19 @@ def update_db_to_now(
     return inserted
 
 
-def fetch_m1_data(
+def fetch_data(
     symbol: str,
+    timeframe: str,
     count: int,
     cache: SQLiteCacheManager,
     client: ChipWhispererMT5Client
 ) -> pd.DataFrame:
     """
-    取得 M1 數據（優先從 DB，不足則從 MT5 補充）
+    取得 K 線數據（優先從 DB，不足則從 MT5 補充）
 
     參數：
         symbol: 商品代碼
+        timeframe: 時間週期
         count: 需要的 K 線數量
         cache: SQLite 快取管理器
         client: MT5 客戶端
@@ -132,12 +171,12 @@ def fetch_m1_data(
     回傳：
         K 線 DataFrame
     """
-    timeframe = 'M1'
-    tf_constant = mt5.TIMEFRAME_M1
+    tf_constant = TIMEFRAME_MAP[timeframe]
+    tf_minutes = TIMEFRAME_MINUTES[timeframe]
 
     # 先從 DB 取得數據
     end_time = datetime.now(timezone.utc)
-    start_time = end_time - timedelta(minutes=count * 2)  # 多取一些以確保足夠
+    start_time = end_time - timedelta(minutes=tf_minutes * count * 2)  # 多取一些以確保足夠
 
     df = cache.query_candles(symbol, timeframe, start_time, end_time)
 
@@ -153,7 +192,7 @@ def fetch_m1_data(
     rates = mt5.copy_rates_from_pos(symbol, tf_constant, 0, count)
 
     if rates is None or len(rates) == 0:
-        raise RuntimeError(f"無法從 MT5 取得 {symbol} M1 數據")
+        raise RuntimeError(f"無法從 MT5 取得 {symbol} {timeframe} 數據")
 
     df = pd.DataFrame(rates)
     df['time'] = pd.to_datetime(df['time'], unit='s', utc=True)
@@ -170,6 +209,7 @@ def fetch_m1_data(
 
 def analyze_vppa(
     symbol: str = "GOLD",
+    timeframe: str = "M1",
     count: int = 2160,
     pivot_length: int = 73,
     price_levels: int = 49,
@@ -183,6 +223,7 @@ def analyze_vppa(
 
     參數：
         symbol: 商品代碼
+        timeframe: 時間週期（預設 M1）
         count: K 線數量
         pivot_length: Pivot Point 左右觀察窗口（預設 20）
         price_levels: 價格分層數量/Number of Rows（預設 49）
@@ -193,8 +234,13 @@ def analyze_vppa(
     回傳：
         VPPA 分析結果（JSON 可序列化格式）
     """
+    # 驗證時間週期
+    timeframe = timeframe.upper()
+    if timeframe not in TIMEFRAME_MAP:
+        raise ValueError(f"無效的時間週期：{timeframe}，支援的週期：{', '.join(TIMEFRAME_MAP.keys())}")
+
     logger.info(f"=" * 60)
-    logger.info(f"開始 VPPA 分析：{symbol}")
+    logger.info(f"開始 VPPA 分析：{symbol} {timeframe}")
     logger.info(f"參數：count={count}, pivot_length={pivot_length}, price_levels={price_levels}, volume_ma_length={volume_ma_length}")
     logger.info(f"=" * 60)
 
@@ -221,13 +267,13 @@ def analyze_vppa(
         # 步驟 1：補充 DB 到最新
         logger.info("-" * 40)
         logger.info("步驟 1：補充 DB 數據到目前為止")
-        new_count = update_db_to_now(symbol, cache, client)
+        new_count = update_db_to_now(symbol, timeframe, cache, client)
         logger.info(f"新增 {new_count} 筆數據")
 
-        # 步驟 2：取得 M1 數據
+        # 步驟 2：取得 K 線數據
         logger.info("-" * 40)
-        logger.info(f"步驟 2：取得 {count} 根 M1 數據")
-        df = fetch_m1_data(symbol, count, cache, client)
+        logger.info(f"步驟 2：取得 {count} 根 {timeframe} 數據")
+        df = fetch_data(symbol, timeframe, count, cache, client)
         logger.info(f"取得 {len(df)} 筆數據")
         logger.info(f"時間範圍：{df['time'].min()} ~ {df['time'].max()}")
 
@@ -263,7 +309,7 @@ def analyze_vppa(
 
         output = {
             'symbol': symbol,
-            'timeframe': 'M1',
+            'timeframe': timeframe,
             'analysis_time': datetime.now(timezone.utc).isoformat(),
             'parameters': {
                 'count': count,
@@ -412,6 +458,13 @@ def main():
     )
 
     parser.add_argument(
+        '--timeframe',
+        type=str,
+        default='M1',
+        help='時間週期（預設：M1），支援 M1/M5/M15/M30/H1/H4/D1 等'
+    )
+
+    parser.add_argument(
         '--count',
         type=int,
         default=2160,
@@ -421,22 +474,22 @@ def main():
     parser.add_argument(
         '--pivot-length',
         type=int,
-        default=73,
-        help='Pivot Point 觀察窗口（預設：73）'
+        default=67,
+        help='Pivot Point 觀察窗口（預設：67）'
     )
 
     parser.add_argument(
         '--price-levels',
         type=int,
-        default=49,
-        help='價格分層數量/Number of Rows（預設：49）'
+        default=27,
+        help='價格分層數量/Number of Rows（預設：27）'
     )
 
     parser.add_argument(
         '--value-area-pct',
         type=float,
-        default=0.68,
-        help='Value Area 百分比（預設：0.68）'
+        default=0.67,
+        help='Value Area 百分比（預設：0.67）'
     )
 
     parser.add_argument(
@@ -491,6 +544,7 @@ def main():
             # 如果需要繪圖，同時取得 DataFrame
             result, df = analyze_vppa(
                 symbol=args.symbol.upper(),
+                timeframe=args.timeframe.upper(),
                 count=args.count,
                 pivot_length=args.pivot_length,
                 price_levels=args.price_levels,
@@ -502,6 +556,7 @@ def main():
         else:
             result = analyze_vppa(
                 symbol=args.symbol.upper(),
+                timeframe=args.timeframe.upper(),
                 count=args.count,
                 pivot_length=args.pivot_length,
                 price_levels=args.price_levels,
