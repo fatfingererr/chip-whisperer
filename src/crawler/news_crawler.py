@@ -229,16 +229,24 @@ class NewsCrawler:
                     # 組合完整文本
                     full_text = f"{title}\n{content}" if content else title
 
-                    # 過濾空新聞
-                    if full_text.strip():
-                        news_list.append({
-                            'title': title,
-                            'content': content,
-                            'full_text': full_text,
-                            'time': time_str
-                        })
-                    else:
+                    # 過濾條件
+                    # 1. 過濾空新聞
+                    if not full_text.strip():
                         logger.debug("跳過空新聞項目")
+                        continue
+
+                    # 2. 過濾通知性新聞（無詳細內容）
+                    if "Commodities Updates:" in title and not content.strip():
+                        logger.debug(f"跳過通知性新聞：{title[:50]}...")
+                        continue
+
+                    # 通過所有過濾條件，添加到列表
+                    news_list.append({
+                        'title': title,
+                        'content': content,
+                        'full_text': full_text,
+                        'time': time_str
+                    })
 
                 except Exception as e:
                     logger.warning(f"解析單則新聞時發生錯誤：{e}")
@@ -277,20 +285,26 @@ class NewsCrawler:
 
         for news in news_list:
             full_text = news['full_text']
+            title = news['title']
 
             # 提取商品
             commodity = self.mapper.extract_commodity(full_text)
             if not commodity:
-                logger.debug(f"新聞未匹配任何商品，忽略：{full_text[:50]}...")
+                # 未匹配商品，保存到 Others/
+                commodity = 'Others'
+                logger.debug(f"新聞未匹配任何商品，保存到 Others/：{full_text[:50]}...")
+
+            # 檢查重複（基於標題）
+            if self.storage.check_duplicate(commodity, title):
+                logger.debug(f"新聞重複，忽略：{title[:50]}...")
                 continue
 
-            # 檢查重複
-            if self.storage.check_duplicate(commodity, full_text):
-                logger.debug(f"新聞重複，忽略：{full_text[:50]}...")
-                continue
-
-            # 保存新聞
-            success, news_id = self.storage.save_news(commodity, full_text)
+            # 保存新聞（傳入完整數據）
+            success, news_id = self.storage.save_news(
+                commodity,
+                full_text,
+                news_data=news  # 傳入完整新聞數據
+            )
 
             if success:
                 saved_news.append({

@@ -4,7 +4,7 @@
 負責將新聞保存到 markets/<商品>/yyyymmdd.txt，並管理 ID。
 """
 
-from typing import Optional, Tuple
+from typing import Optional, Tuple, Dict
 from pathlib import Path
 from datetime import datetime
 from loguru import logger
@@ -31,15 +31,17 @@ class NewsStorage:
         self,
         commodity_dir: str,
         news_text: str,
-        date: Optional[datetime] = None
+        date: Optional[datetime] = None,
+        news_data: Optional[Dict] = None
     ) -> Tuple[bool, int]:
         """
         保存新聞到指定商品目錄
 
         參數:
             commodity_dir: 商品目錄名稱（如 'Gold'）
-            news_text: 新聞文本（英文原文）
+            news_text: 新聞文本（英文原文，用於相容性）
             date: 日期（預設為當天）
+            news_data: 新聞詳細資料（包含 title, content, time）
 
         回傳:
             (是否成功, 新聞 ID)
@@ -69,8 +71,24 @@ class NewsStorage:
                     # Windows 或不支援檔案鎖的系統，直接寫入
                     pass
 
-                # 寫入格式：[ID] 新聞內容
-                f.write(f"[{next_id}] {news_text}\n")
+                # 結構化寫入格式
+                if news_data:
+                    title = news_data.get('title', '').strip()
+                    content = news_data.get('content', '').strip()
+                    time_str = news_data.get('time', '').strip()
+
+                    # 寫入標題
+                    f.write(f"[{next_id}] {title}\n")
+                    
+                    # 寫入內容（如果有）
+                    if content:
+                        f.write(f"\n{content}\n")
+                    else:
+                        f.write("(無詳細內容)\n")
+                else:
+                    # 舊格式相容：直接寫入 news_text
+                    f.write(f"[{next_id}] {news_text}\n")
+
                 f.write("-" * 80 + "\n")
 
                 # 解鎖（若有鎖）
@@ -124,7 +142,7 @@ class NewsStorage:
 
         參數:
             commodity_dir: 商品目錄名稱
-            news_text: 新聞文本
+            news_text: 新聞標題（用於比對）
             date: 日期
 
         回傳:
@@ -141,11 +159,26 @@ class NewsStorage:
 
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
-                content = f.read()
+                lines = f.readlines()
 
-            # 簡單的字串包含檢查
-            # 移除 news_text 前後空白，並檢查是否已在檔案中
-            return news_text.strip() in content
+            # 提取所有已保存新聞的標題
+            # 格式：[ID] 標題
+            input_title = news_text.strip()
+            for line in lines:
+                line = line.strip()
+                # 檢查是否為標題行（以 [數字] 開頭）
+                if line.startswith('[') and ']' in line:
+                    # 提取標題部分（移除 [ID] 前綴）
+                    try:
+                        title_part = line.split(']', 1)[1].strip()
+                        # 比對標題
+                        if title_part == input_title:
+                            logger.debug(f"發現重複標題：{input_title[:50]}...")
+                            return True
+                    except IndexError:
+                        continue
+
+            return False
 
         except Exception as e:
             logger.warning(f"檢查重複時發生錯誤：{e}")

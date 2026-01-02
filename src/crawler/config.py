@@ -22,6 +22,9 @@ class CrawlerConfig:
         markets_dir: markets 目錄路徑
         enabled: 是否啟用爬蟲
         telegram_notify_groups: 要通知的 Telegram 群組 ID 列表
+        enable_translation: 是否啟用新聞翻譯
+        translation_target_lang: 翻譯目標語言
+        translation_max_retries: 翻譯最大重試次數
     """
 
     target_url: str
@@ -30,6 +33,11 @@ class CrawlerConfig:
     markets_dir: str
     enabled: bool
     telegram_notify_groups: List[int]
+
+    # 翻譯相關配置
+    enable_translation: bool
+    translation_target_lang: str
+    translation_max_retries: int
 
     @classmethod
     def from_env(cls) -> 'CrawlerConfig':
@@ -54,5 +62,10 @@ class CrawlerConfig:
                 int(gid.strip())
                 for gid in os.getenv('CRAWLER_NOTIFY_GROUPS', '').split(',')
                 if gid.strip()
-            ]
+            ],
+
+            # 翻譯配置
+            enable_translation=os.getenv('CRAWLER_ENABLE_TRANSLATION', 'true').lower() in ('true', '1', 'yes'),
+            translation_target_lang=os.getenv('CRAWLER_TRANSLATION_TARGET_LANG', 'zh-TW'),
+            translation_max_retries=int(os.getenv('CRAWLER_TRANSLATION_MAX_RETRIES', '3')),
         )

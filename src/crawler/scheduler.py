@@ -12,6 +12,7 @@ from telegram.ext import Application
 
 from .config import CrawlerConfig
 from .news_crawler import NewsCrawler
+from .translator import get_translator
 
 
 class CrawlerScheduler:
@@ -91,35 +92,44 @@ class CrawlerScheduler:
         """
         commodity = news['commodity']
         news_id = news['news_id']
-        text = news['text']
+        text = news['text']  # 英文原文
         time = news.get('time', 'N/A')
+
+        # ========== 新增：根據配置決定是否翻譯 ==========
+        if self.config.enable_translation:
+            try:
+                # 取得翻譯器實例
+                translator = get_translator(
+                    target_lang=self.config.translation_target_lang,
+                    max_retries=self.config.translation_max_retries
+                )
+
+                # 翻譯新聞文本（失敗時自動降級回原文）
+                translated_text = translator.translate(text, fallback_to_original=True)
+
+                logger.debug(
+                    f"新聞翻譯成功：{commodity} (ID: {news_id}), "
+                    f"{len(text)} 字元 -> {len(translated_text)} 字元"
+                )
+
+            except Exception as e:
+                # 翻譯失敗，降級回原文
+                logger.error(f"翻譯失敗（{commodity}, ID: {news_id}），使用原文：{e}")
+                translated_text = text
+        else:
+            # 未啟用翻譯，直接使用原文
+            translated_text = text
+            logger.debug(f"翻譯已停用，使用原文：{commodity} (ID: {news_id})")
+        # ================================================
 
         # 限制文本長度（Telegram 單則訊息最多 4096 字元）
         max_length = 3000
-        if len(text) > max_length:
-            text = text[:max_length] + "..."
-
-        # 根據商品類型選擇表情符號
-        emoji_map = {
-            'Gold': '🥇',
-            'Silver': '🥈',
-            'Bitcoin': '₿',
-            'Ethereum': '⟠',
-            'Brent': '🛢️',
-            'Wti': '🛢️',
-            'Copper': '🔶',
-            'Corn': '🌽',
-            'Coffee': '☕',
-            'Wheat': '🌾',
-        }
-        emoji = emoji_map.get(commodity, '📊')
+        if len(translated_text) > max_length:
+            translated_text = translated_text[:max_length] + "..."
 
         message = (
-            f"{emoji} **{commodity} 商品新聞** (ID: {news_id})\n"
-            f"{'─' * 40}\n\n"
-            f"{text}\n\n"
-            f"{'─' * 40}\n"
-            f"⏰ {time}"
+            f"**最新消息**\n"
+            f"{translated_text}\n\n"  # 使用翻譯後的文本
         )
 
         return message
