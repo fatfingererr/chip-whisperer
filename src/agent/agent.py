@@ -46,6 +46,9 @@ class MT5Agent:
         # 對話歷史（用於多輪對話）
         self.conversation_history: List[Dict[str, Any]] = []
 
+        # 儲存最後的工具結果（用於傳遞圖片等資源）
+        self.last_tool_result: Optional[Dict[str, Any]] = None
+
         logger.info(f"MT5 Agent 初始化完成（模型：{self.model}）")
 
     def process_message(
@@ -115,6 +118,15 @@ class MT5Agent:
                         logger.info("回應達到 token 限制，但仍提取可用內容")
                     text_response = self._extract_text_response(response)
                     logger.info("對話完成")
+
+                    # 如果有圖片資源，合併到回應中
+                    if self.last_tool_result:
+                        result = self.last_tool_result.copy()
+                        result["message"] = text_response
+                        # 清空以便下次使用
+                        self.last_tool_result = None
+                        return result
+
                     return text_response
 
                 elif response.stop_reason == "tool_use":
@@ -140,6 +152,11 @@ class MT5Agent:
 
                             # 執行工具
                             tool_result = execute_tool(tool_name, tool_input)
+
+                            # 儲存工具結果（用於圖片等資源傳遞）
+                            if isinstance(tool_result, dict) and tool_result.get("data", {}).get("image_path"):
+                                self.last_tool_result = tool_result
+                                logger.info(f"偵測到圖片資源：{tool_result['data']['image_path']}")
 
                             # 格式化工具結果
                             tool_results.append({
