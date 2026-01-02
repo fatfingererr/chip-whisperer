@@ -6,8 +6,10 @@
 
 from telegram import Update, Chat, ChatMember
 from telegram.ext import ContextTypes
+from telegram.error import TimedOut, NetworkError
 from loguru import logger
 import sys
+import os
 from pathlib import Path
 
 # 確保可以匯入 agent 模組
@@ -234,11 +236,21 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     處理一般文字訊息
 
     只處理白名單群組中管理員的訊息。
+    使用 AgentManager 根據訊息內容路由到對應的 agent。
     私聊訊息和非授權訊息會被靜默忽略。
     """
     user = update.effective_user
     chat = update.effective_chat
-    user_message = update.message.text
+
+    # 處理一般訊息和編輯過的訊息
+    message = update.message or update.edited_message
+    if not message or not message.text:
+        logger.debug("忽略非文字訊息")
+        return
+
+    user_message = message.text
+
+    logger.info(f"收到訊息 - 聊天類型: {chat.type}, 群組 ID: {chat.id}, 用戶: {user.id} ({user.username}), 訊息: {user_message}")
 
     # ========================================================================
     # 1. 忽略私聊訊息
@@ -262,47 +274,192 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         logger.error("Bot 設定未載入")
         return
 
-    if not await _check_group_admin(update, context, config):
+    check_result = await _check_group_admin(update, context, config)
+    logger.info(f"權限檢查結果: {check_result}")
+    if not check_result:
         return  # 靜默忽略
 
     # ========================================================================
-    # 4. 記錄並處理訊息
+    # 4. 取得 AgentManager
+    # ========================================================================
+    agent_manager = context.bot_data.get('agent_manager')
+    if not agent_manager:
+        logger.error("AgentManager 未初始化")
+        await message.reply_text("系統錯誤：Agent 管理器未初始化")
+        return
+
+    # ========================================================================
+    # 5. 匹配 Agent
+    # ========================================================================
+    agent_name = agent_manager.match_agent(user_message)
+    logger.info(f"Agent 匹配結果: {agent_name}")
+
+    if not agent_name:
+        logger.info(f"訊息未匹配到任何 agent，忽略：{user_message[:50]}")
+        return  # 靜默忽略未匹配的訊息
+
+    # ========================================================================
+    # 6. 記錄並處理訊息
     # ========================================================================
     logger.info(
         f"處理訊息 - 群組: {chat.id} ({chat.title}), "
         f"管理員: {user.id} ({user.username}), "
+        f"Agent: {agent_name}, "
         f"訊息: {user_message}"
     )
 
     # 顯示處理中訊息
-    processing_message = await update.message.reply_text("正在處理您的請求，請稍候...")
+    processing_message = await message.reply_text(
+        f"{agent_name.capitalize()} 正在處理中..."
+    )
 
     try:
-        # 取得或建立 Agent
-        agent = context.bot_data.get('agent')
+        # 取得 agent 實例
+        agent = agent_manager.get_agent(agent_name)
         if not agent:
-            agent = MT5Agent(
-                api_key=config.anthropic_api_key,
-                model=config.claude_model
-            )
-            context.bot_data['agent'] = agent
+            logger.error(f"找不到 agent：{agent_name}")
+            await processing_message.delete()
+            await message.reply_text(f"系統錯誤：找不到 {agent_name}")
+            return
 
-        # 處理訊息
-        response = agent.process_message(user_message)
+        # ====================================================================
+        # 7. 整合記憶參考
+        # ====================================================================
+        daily_memory = agent_manager.read_daily_memory(agent_name)
 
+        # 建立增強的訊息（若有記憶則附加）
+        if daily_memory:
+            enhanced_message = f"{user_message}\n\n[本日記憶參考]\n{daily_memory}"
+            logger.debug(f"已整合 {agent_name} 的記憶：{len(daily_memory)} 字元")
+        else:
+            enhanced_message = user_message
+            logger.debug(f"{agent_name} 沒有本日記憶")
+
+        # 取得 system prompt（從 agent 的 default_system_prompt 屬性）
+        system_prompt = getattr(agent, 'default_system_prompt', None)
+
+        # ====================================================================
+        # 8. 處理訊息
+        # ====================================================================
+        response = agent.process_message(
+            enhanced_message,
+            system_prompt=system_prompt
+        )
+
+        # ====================================================================
+        # 9. 記錄互動到日誌
+        # ====================================================================
+        from datetime import datetime
+        import pytz
+        taiwan_tz = pytz.timezone('Asia/Taipei')
+        timestamp = datetime.now(taiwan_tz).strftime('%Y-%m-%d %H:%M:%S')
+
+        interaction_log = f"""
+[{timestamp}] 用戶 {user.username} ({user.id}): {user_message}
+回應: {response}
+
+"""
+        agent_manager.append_to_daily_log(agent_name, interaction_log)
+
+        # ====================================================================
+        # 10. 回傳結果
+        # ====================================================================
         # 刪除處理中訊息
         await processing_message.delete()
 
-        # 回傳結果（處理長訊息）
-        if len(response) <= 4096:
-            await update.message.reply_text(response)
-        else:
-            # 分段傳送
-            chunks = [response[i:i+4096] for i in range(0, len(response), 4096)]
-            for chunk in chunks:
-                await update.message.reply_text(chunk)
+        # 檢查是否有圖片需要發送
+        image_sent = False
+        if isinstance(response, dict) and response.get("data", {}).get("image_path"):
+            image_path = response["data"]["image_path"]
+            image_type = response["data"].get("image_type", "chart")
 
-        logger.info(f"成功回應群組 {chat.id} 管理員 {user.id}")
+            logger.info(f"準備發送圖片：{image_path}（類型：{image_type}）")
+
+            try:
+                # 準備完整的回應文字
+                interpretation = response.get("data", {}).get("interpretation", "")
+                summary = response["data"].get("summary", {})
+
+                # 建立 caption（包含摘要資訊）
+                if image_type == "vppa_chart":
+                    caption_parts = [
+                        f"📊 {summary.get('symbol', 'N/A')} {summary.get('timeframe', 'N/A')} VPPA 分析\n",
+                        f"⏰ 時間範圍：{summary.get('date_range', {}).get('from', 'N/A')[:16]} ~ "
+                        f"{summary.get('date_range', {}).get('to', 'N/A')[:16]}",
+                        f"📈 K 線數：{summary.get('total_bars', 'N/A')} 根",
+                        f"📍 Pivot Points：{summary.get('pivot_points', 'N/A')} 個",
+                        f"📦 區間數量：{summary.get('ranges', 'N/A')} 個"
+                    ]
+
+                    # 如果有 interpretation，嘗試加到 caption 中（Telegram caption 限制 1024 字元）
+                    if interpretation:
+                        caption_parts.append(f"\n{interpretation[:800]}")  # 預留空間
+
+                    caption = "\n".join(caption_parts)
+
+                    # Telegram caption 限制 1024 字元
+                    if len(caption) > 1024:
+                        caption = caption[:1021] + "..."
+                else:
+                    # 其他類型圖片，使用 message 或 interpretation
+                    caption = interpretation[:1024] if interpretation else response.get("message", "分析結果")[:1024]
+
+                # 發送圖片（帶完整 caption）
+                with open(image_path, 'rb') as photo_file:
+                    await message.reply_photo(
+                        photo=photo_file,
+                        caption=caption
+                    )
+
+                image_sent = True
+                logger.info(f"圖片已發送：{image_path}")
+
+                # 清理暫存檔
+                try:
+                    os.remove(image_path)
+                    logger.debug(f"已清理暫存檔：{image_path}")
+                except Exception as cleanup_error:
+                    logger.warning(f"清理暫存檔失敗：{cleanup_error}")
+
+            except (TimedOut, NetworkError) as timeout_error:
+                # Telegram 超時錯誤：圖片可能已經發送成功，只是回應超時
+                logger.warning(f"發送圖片時 Telegram 超時（圖片可能已發送）：{timeout_error}")
+                # 清理暫存檔
+                try:
+                    os.remove(image_path)
+                    logger.debug(f"已清理暫存檔：{image_path}")
+                except Exception as cleanup_error:
+                    logger.warning(f"清理暫存檔失敗：{cleanup_error}")
+                # 標記為已發送（因為很可能已經發送成功）
+                image_sent = True
+
+            except Exception as img_error:
+                logger.exception(f"發送圖片失敗：{img_error}")
+                # 嘗試發送錯誤訊息（不使用 await，避免再次超時）
+                try:
+                    await message.reply_text(f"⚠️ 圖表已產生但發送時發生錯誤：{type(img_error).__name__}")
+                except:
+                    logger.error("無法發送錯誤訊息")
+                image_sent = False
+
+        # 如果沒有圖片或圖片發送失敗，發送文字回應
+        if not image_sent:
+            # 提取文字回應（處理 dict 格式）
+            if isinstance(response, dict):
+                text_response = response.get("data", {}).get("interpretation") or response.get("message", str(response))
+            else:
+                text_response = str(response)
+
+            # 回傳結果（處理長訊息）
+            if len(text_response) <= 4096:
+                await message.reply_text(text_response)
+            else:
+                # 分段傳送
+                chunks = [text_response[i:i+4096] for i in range(0, len(text_response), 4096)]
+                for chunk in chunks:
+                    await message.reply_text(chunk)
+
+        logger.info(f"成功回應群組 {chat.id} 管理員 {user.id}（Agent: {agent_name}）")
 
     except Exception as e:
         logger.exception(f"處理訊息時發生錯誤：{str(e)}")
@@ -313,8 +470,8 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         except:
             pass
 
-        error_message = f"抱歉，處理您的請求時發生錯誤：{str(e)}"
-        await update.message.reply_text(error_message)
+        error_message = f"抱歉，{agent_name.capitalize()} 處理您的請求時發生錯誤：{str(e)}"
+        await message.reply_text(error_message)
 
 
 async def handle_error(update: Update, context: ContextTypes.DEFAULT_TYPE):

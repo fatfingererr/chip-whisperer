@@ -12,6 +12,7 @@ from telegram.ext import (
     filters,
     ContextTypes
 )
+from telegram.request import HTTPXRequest
 from loguru import logger
 from datetime import datetime
 import pytz
@@ -28,6 +29,10 @@ from .handlers import (
 # 新增：導入爬蟲模組
 from src.crawler.config import CrawlerConfig
 from src.crawler.scheduler import CrawlerScheduler
+
+# 新增：導入 AgentManager 和 AgentScheduler
+from src.agent.agent_manager import AgentManager
+from src.agent.agent_scheduler import AgentScheduler
 
 
 class TelegramBot:
@@ -46,10 +51,19 @@ class TelegramBot:
         """
         self.config = config
 
+        # 建立自訂的 HTTPXRequest，設定更長的超時時間（用於發送大圖片）
+        request = HTTPXRequest(
+            connection_pool_size=8,
+            read_timeout=60.0,    # 讀取超時 60 秒
+            write_timeout=60.0,   # 寫入超時 60 秒
+            connect_timeout=10.0  # 連線超時 10 秒
+        )
+
         # 建立 Application
         self.application = (
             Application.builder()
             .token(config.telegram_bot_token)
+            .request(request)
             .build()
         )
 
@@ -58,6 +72,17 @@ class TelegramBot:
 
         # 註冊處理器
         self._register_handlers()
+
+        # 新增：初始化 AgentManager
+        self.agent_manager = AgentManager(
+            api_key=config.anthropic_api_key,
+            model=config.claude_model
+        )
+        self.application.bot_data['agent_manager'] = self.agent_manager
+
+        # 新增：初始化 AgentScheduler
+        self.agent_scheduler = AgentScheduler(agent_manager=self.agent_manager)
+        self.application.bot_data['agent_scheduler'] = self.agent_scheduler
 
         # 新增：初始化爬蟲調度器
         crawler_config = CrawlerConfig.from_env()
@@ -83,10 +108,10 @@ class TelegramBot:
         from .handlers import crawl_now_command
         self.application.add_handler(CommandHandler("crawl_now", crawl_now_command))
 
-        # 訊息處理器：只接收群組中的非指令文字訊息
+        # 訊息處理器：接收所有非指令文字訊息（在處理器內部檢查群組）
         self.application.add_handler(
             MessageHandler(
-                filters.TEXT & ~filters.COMMAND & filters.ChatType.GROUPS,
+                filters.TEXT & ~filters.COMMAND,
                 handle_message
             )
         )
@@ -115,6 +140,10 @@ class TelegramBot:
         # 新增：啟動爬蟲定時任務
         self.crawler_scheduler.start()
         logger.info("爬蟲定時任務已整合到 Bot 生命週期")
+
+        # 新增：啟動 Agent 定時任務
+        self.agent_scheduler.start()
+        logger.info("Agent 定時任務已整合到 Bot 生命週期")
 
     async def _send_startup_message(self, application: Application):
         """
@@ -176,6 +205,10 @@ class TelegramBot:
         self.crawler_scheduler.stop()
         logger.info("爬蟲定時任務已停止")
 
+        # 新增：停止 Agent 定時任務
+        self.agent_scheduler.stop()
+        logger.info("Agent 定時任務已停止")
+
     def run(self):
         """
         啟動 Bot
@@ -192,7 +225,7 @@ class TelegramBot:
         try:
             self.application.run_polling(
                 allowed_updates=Update.ALL_TYPES,
-                drop_pending_updates=True  # 忽略啟動前的訊息
+                drop_pending_updates=False  # 不忽略待處理的訊息，方便調試
             )
         except KeyboardInterrupt:
             logger.info("收到中斷信號，正在關閉...")
