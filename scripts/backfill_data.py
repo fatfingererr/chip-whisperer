@@ -1,14 +1,15 @@
 #!/usr/bin/env python3
 """
-M1 歷史數據批次回填腳本
+歷史數據批次回填腳本
 
-此腳本會對指定的商品不斷往回抓取 M1 數據，直到沒有更多數據為止，
+此腳本會對指定的商品不斷往回抓取指定週期的數據，直到沒有更多數據為止，
 並將所有數據保存到 SQLite 資料庫中。
 
 使用方式：
-    python scripts/backfill_m1_data.py GOLD
-    python scripts/backfill_m1_data.py GOLD --batch-size 5000
-    python scripts/backfill_m1_data.py GOLD --db-path data/my_cache.db
+    python scripts/backfill_data.py GOLD
+    python scripts/backfill_data.py GOLD --timeframe M5
+    python scripts/backfill_data.py GOLD --timeframe H1 --batch-size 5000
+    python scripts/backfill_data.py GOLD --db-path data/my_cache.db
 """
 
 import sys
@@ -29,17 +30,70 @@ from src.core.mt5_client import ChipWhispererMT5Client
 from src.core.sqlite_cache import SQLiteCacheManager
 
 
-def backfill_m1_data(
+# MT5 時間週期對應表
+TIMEFRAME_MAP = {
+    'M1': mt5.TIMEFRAME_M1,      # 1 分鐘
+    'M2': mt5.TIMEFRAME_M2,      # 2 分鐘
+    'M3': mt5.TIMEFRAME_M3,      # 3 分鐘
+    'M4': mt5.TIMEFRAME_M4,      # 4 分鐘
+    'M5': mt5.TIMEFRAME_M5,      # 5 分鐘
+    'M6': mt5.TIMEFRAME_M6,      # 6 分鐘
+    'M10': mt5.TIMEFRAME_M10,    # 10 分鐘
+    'M12': mt5.TIMEFRAME_M12,    # 12 分鐘
+    'M15': mt5.TIMEFRAME_M15,    # 15 分鐘
+    'M20': mt5.TIMEFRAME_M20,    # 20 分鐘
+    'M30': mt5.TIMEFRAME_M30,    # 30 分鐘
+    'H1': mt5.TIMEFRAME_H1,      # 1 小時
+    'H2': mt5.TIMEFRAME_H2,      # 2 小時
+    'H3': mt5.TIMEFRAME_H3,      # 3 小時
+    'H4': mt5.TIMEFRAME_H4,      # 4 小時
+    'H6': mt5.TIMEFRAME_H6,      # 6 小時
+    'H8': mt5.TIMEFRAME_H8,      # 8 小時
+    'H12': mt5.TIMEFRAME_H12,    # 12 小時
+    'D1': mt5.TIMEFRAME_D1,      # 日線
+    'W1': mt5.TIMEFRAME_W1,      # 週線
+    'MN1': mt5.TIMEFRAME_MN1,    # 月線
+}
+
+# 時間週期對應的分鐘數（用於計算時間偏移）
+TIMEFRAME_MINUTES = {
+    'M1': 1,
+    'M2': 2,
+    'M3': 3,
+    'M4': 4,
+    'M5': 5,
+    'M6': 6,
+    'M10': 10,
+    'M12': 12,
+    'M15': 15,
+    'M20': 20,
+    'M30': 30,
+    'H1': 60,
+    'H2': 120,
+    'H3': 180,
+    'H4': 240,
+    'H6': 360,
+    'H8': 480,
+    'H12': 720,
+    'D1': 1440,
+    'W1': 10080,
+    'MN1': 43200,
+}
+
+
+def backfill_data(
     symbol: str,
+    timeframe: str = "M1",
     db_path: str = "data/candles.db",
     batch_size: int = 10000,
     max_retries: int = 3
 ) -> dict:
     """
-    批次回填 M1 歷史數據
+    批次回填歷史數據
 
     參數：
         symbol: 商品代碼（例如 'GOLD', 'EURUSD'）
+        timeframe: 時間週期（例如 'M1', 'M5', 'H1', 'D1'）
         db_path: SQLite 資料庫路徑
         batch_size: 每次請求的 K 線數量
         max_retries: 失敗時的最大重試次數
@@ -47,8 +101,13 @@ def backfill_m1_data(
     回傳：
         包含統計資訊的字典
     """
-    timeframe = 'M1'
-    tf_constant = mt5.TIMEFRAME_M1
+    # 驗證時間週期
+    timeframe = timeframe.upper()
+    if timeframe not in TIMEFRAME_MAP:
+        raise ValueError(f"無效的時間週期：{timeframe}，支援的週期：{', '.join(TIMEFRAME_MAP.keys())}")
+
+    tf_constant = TIMEFRAME_MAP[timeframe]
+    tf_minutes = TIMEFRAME_MINUTES[timeframe]
 
     # 統計資訊
     stats = {
@@ -64,7 +123,7 @@ def backfill_m1_data(
     }
 
     logger.info(f"=" * 60)
-    logger.info(f"開始回填 {symbol} M1 歷史數據")
+    logger.info(f"開始回填 {symbol} {timeframe} 歷史數據")
     logger.info(f"批次大小：{batch_size}，資料庫：{db_path}")
     logger.info(f"=" * 60)
 
@@ -162,7 +221,7 @@ def backfill_m1_data(
                         consecutive_empty = 0  # 重置計數
 
                     # 更新下一批的結束時間（從最早的時間往前）
-                    current_end_time = batch_oldest - timedelta(minutes=1)
+                    current_end_time = batch_oldest - timedelta(minutes=tf_minutes)
 
                     # 顯示進度
                     logger.info(f"累計進度：{stats['total_records']} 筆，{stats['batches_fetched']} 批次")
@@ -186,6 +245,7 @@ def backfill_m1_data(
         logger.info(f"=" * 60)
         logger.info(f"回填完成！")
         logger.info(f"商品：{symbol}")
+        logger.info(f"週期：{timeframe}")
         logger.info(f"總筆數：{stats['total_records']}")
         logger.info(f"批次數：{stats['batches_fetched']}")
         logger.info(f"時間範圍：{stats['oldest_time']} ~ {stats['newest_time']}")
@@ -207,13 +267,19 @@ def backfill_m1_data(
 
 def main():
     parser = argparse.ArgumentParser(
-        description='M1 歷史數據批次回填腳本',
+        description='歷史數據批次回填腳本',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 範例：
-    python scripts/backfill_m1_data.py GOLD
-    python scripts/backfill_m1_data.py EURUSD --batch-size 5000
-    python scripts/backfill_m1_data.py GOLD --db-path data/my_cache.db
+    python scripts/backfill_data.py GOLD
+    python scripts/backfill_data.py GOLD --timeframe M5
+    python scripts/backfill_data.py EURUSD --timeframe H1 --batch-size 5000
+    python scripts/backfill_data.py GOLD --timeframe D1 --db-path data/my_cache.db
+
+支援的時間週期：
+    M1, M2, M3, M4, M5, M6, M10, M12, M15, M20, M30
+    H1, H2, H3, H4, H6, H8, H12
+    D1, W1, MN1
         """
     )
 
@@ -221,6 +287,13 @@ def main():
         'symbol',
         type=str,
         help='商品代碼（例如：GOLD, EURUSD, USDJPY）'
+    )
+
+    parser.add_argument(
+        '--timeframe',
+        type=str,
+        default='M1',
+        help='時間週期（預設：M1）'
     )
 
     parser.add_argument(
@@ -252,15 +325,16 @@ def main():
 
     # 執行回填
     try:
-        stats = backfill_m1_data(
+        stats = backfill_data(
             symbol=args.symbol.upper(),
+            timeframe=args.timeframe.upper(),
             db_path=args.db_path,
             batch_size=args.batch_size,
             max_retries=args.max_retries
         )
 
         if stats['status'] == 'completed':
-            print(f"\n✅ 回填成功！共 {stats['total_records']} 筆 M1 數據")
+            print(f"\n✅ 回填成功！共 {stats['total_records']} 筆 {stats['timeframe']} 數據")
             sys.exit(0)
         else:
             print(f"\n❌ 回填失敗：{stats.get('error', '未知錯誤')}")
