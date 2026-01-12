@@ -470,7 +470,7 @@ def calculate_volume_profile_for_range(
     )
 
     # 驗證輸入
-    required_columns = ['high', 'low', 'real_volume']
+    required_columns = ['high', 'low']
     missing_columns = [col for col in required_columns if col not in df.columns]
     if missing_columns:
         raise ValueError(f"缺少必要欄位：{missing_columns}")
@@ -482,8 +482,22 @@ def calculate_volume_profile_for_range(
         )
 
     # 取得區間資料（包含 end_idx）
-    range_df = df.iloc[start_idx:end_idx+1]
+    range_df = df.iloc[start_idx:end_idx+1].copy()
     bar_count = len(range_df)
+
+    # 決定使用哪個成交量欄位
+    # 優先使用 real_volume，如果全為 0 則使用 tick_volume
+    volume_column = 'real_volume'
+    if 'real_volume' in range_df.columns:
+        total_real_volume = range_df['real_volume'].sum()
+        if total_real_volume == 0 and 'tick_volume' in range_df.columns:
+            logger.info("real_volume 全為 0，改用 tick_volume 計算 Volume Profile")
+            volume_column = 'tick_volume'
+    elif 'tick_volume' in range_df.columns:
+        logger.info("缺少 real_volume，使用 tick_volume 計算 Volume Profile")
+        volume_column = 'tick_volume'
+    else:
+        raise ValueError("缺少必要欄位：需要 'real_volume' 或 'tick_volume'")
 
     # 計算價格範圍
     price_highest = range_df['high'].max()
@@ -502,7 +516,7 @@ def calculate_volume_profile_for_range(
             'price_highest': price_highest,
             'price_step': 0,
             'price_centers': np.full(price_levels, price_lowest),
-            'total_volume': range_df['real_volume'].sum(),
+            'total_volume': range_df[volume_column].sum(),
             'bar_count': bar_count
         }
 
@@ -516,7 +530,7 @@ def calculate_volume_profile_for_range(
         row = range_df.iloc[idx]
         bar_high = row['high']
         bar_low = row['low']
-        bar_volume = row['real_volume']
+        bar_volume = row[volume_column]
         bar_range = bar_high - bar_low
 
         # 遍歷每個價格層級
